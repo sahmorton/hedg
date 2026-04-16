@@ -2,6 +2,7 @@
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <string>
+#include <array>
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -54,6 +55,7 @@ public:
 	}
 
 protected:
+	static constexpr std::size_t stream_buffer_size = 4096;
 	bool is_connected;
 	ssl_socket sock_;
 	std::string host_name_;
@@ -61,7 +63,7 @@ protected:
 	boost::asio::streambuf inp_buff_;
 	boost::asio::streambuf out_buff_;
 	std::string session_id_;
-	char buff[15];
+	std::array<char, stream_buffer_size> buff{};
 	boost::system::error_code ec;
 
 };

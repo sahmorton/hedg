@@ -22,8 +22,8 @@ public:
 	}
 
 	std::string recv_buff() {
-		int bytes = boost::asio::read(sock_, buffer(buff), ec);
-		return std::string(buff, bytes);
+		std::size_t bytes = boost::asio::read(sock_, buffer(buff), ec);
+		return std::string(buff.data(), bytes);
 	}
 
 };
