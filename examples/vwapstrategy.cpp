@@ -121,13 +121,14 @@ private:
 
 
 
-int main() {
-	hedg::Framework betfair;	
+int main() 
+{
+	hedg::Framework betfair;
+	//use shared_ptr to initialize strategy	
 	std::shared_ptr<hedg::Base_Strategy> my_strat = std::make_shared<vwap_strategy>();
-	//not neccessary to set country code or event type if you want to use all set in the config.cpp file
-	//my_strat->set_country_code({ "US", "NZ" })->set_event_types({ "7","4339" });
+	my_strat->set_country_code({ "GB" })->set_event_types({ "7","4339" });
 	betfair.add_strategy(my_strat);
+	//can add as many strategies as possible
 	betfair.start();
-
 }
 	
