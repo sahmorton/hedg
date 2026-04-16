@@ -35,31 +35,44 @@ void Publisher::run() {
 void Publisher::try_subscribe(std::queue<std::pair<std::string, Market_Projection> >& runnable_markets) {
 
 	std::deque<std::pair<std::string, Market_Projection> >subscription_buffer;
-	int no_subscribed = subscribed_.size();
+	int no_subscribed = 0;
+	{
+		std::lock_guard<std::mutex> lk(mut_);
+		no_subscribed = subscribed_.size();
+	}
 	auto pending = utils::get_ids(runnable_markets, subscription_buffer, max_markets_ - no_subscribed);
 	std::string market_ids = pending.first;
 	int number_pending = pending.second;
-	if (number_pending && no_subscribed + number_pending <= max_markets_ && !free_socks_.empty()) {
+	if (!number_pending || no_subscribed + number_pending > max_markets_)
+		return;
 
-		int idx = free_socks_.front();
+	int idx = -1;
+	{
+		std::lock_guard<std::mutex> lk(mut_);
+		if (free_socks_.empty())
+			return;
+		idx = free_socks_.front();
 		free_socks_.pop();
+	}
 
-		try{
+	try {
+		{
+			std::lock_guard<std::mutex> lk(mut_);
 			socks[idx]->send_request(stream::authenticate_msg, params::stream_authenticate(market_gen_.get_sessionid()));
 			socks[idx]->send_request(stream::subscribe_msg, params::stream_subscribe(market_ids));
 			sock_flags[idx].store(1);
 			spdlog::info("Subscribed to " + market_ids);
 
-
 			for (auto subs : subscription_buffer) {
 				subscribed_.push_back(subs);
 			}
 			cache_socket(idx, subscription_buffer);
-		}catch (boost::system::system_error e) {
+		}
+	}
+	catch (boost::system::system_error e) {
+		std::lock_guard<std::mutex> lk(mut_);
 			spdlog::error(e.what());
 			free_socks_.push(idx);
-		}
-
 	}
 
 }
@@ -86,54 +99,47 @@ void Publisher::order_subscribe(io_service& service, ssl::context& context) {
 
 void Publisher::clean_up_markets(io_service& service, ssl::context& context) {
 
-	std::queue<std::string>pending_removal;
 	for (;;) {
+		int sleep_secs = 30;
+		{
+			std::lock_guard<std::mutex> lk(mut_);
+			if (!subscribed_.empty()) {
+				auto market_id = subscribed_.front().first;
+				auto expiry_time = subscribed_.front().second.market_start_time_;
+				double diff = Timing::time_diff_mins(expiry_time, Timing::now());
+				int diff_in_secs = static_cast<int>(diff * 60);
 
-		if (!subscribed_.empty()) {
+				if (diff_in_secs < 10) {
+					//to notify threads using data that it's time up
+					spdlog::info("Rendering " + market_id + " inactive");
+					handler_->deactivate_market(market_id);
+					subscribed_.pop_front();
 
-			auto market_id = subscribed_.front().first;
-			auto expiry_time = subscribed_.front().second.market_start_time_;
-			double diff = Timing::time_diff_mins(expiry_time, Timing::now());
-			int diff_in_secs = diff * 60;
+					if (last_ids.find(market_id) != last_ids.end()) {
+						int sock_idx = last_ids[market_id].first;
+						//socket is now free
+						sock_flags[sock_idx].store(0);
+						socks[sock_idx].reset();
+						socks[sock_idx] = utils::new_streamer(service, context);
+						if (socks[sock_idx])
+							free_socks_.push(sock_idx);
 
-			if (diff_in_secs < 10) {
-
-
-				//to notify threads using data that it's time up 
-				spdlog::info("Rendering " + market_id + " inactive");
-				handler_->deactivate_market(market_id);
-				subscribed_.pop_front();
-
-				if (last_ids.find(market_id) != last_ids.end()) {
-					int sock_idx = last_ids[market_id].first;
-					//socket is now free
-					sock_flags[sock_idx].store(0);
-					std::this_thread::sleep_for(std::chrono::seconds(10));
-					socks[sock_idx].reset();
-					socks[sock_idx] = utils::new_streamer(service, context);
-					if(socks[sock_idx])
-						free_socks_.push(sock_idx);
-
-					//now clear inactive markets
-					for (auto mkts : last_ids[market_id].second) {
-						handler_->clear_market(mkts);
-						spdlog::info("Removed " + mkts + " finally");
+						//now clear inactive markets
+						for (auto mkts : last_ids[market_id].second) {
+							handler_->clear_market(mkts);
+							spdlog::info("Removed " + mkts + " finally");
+						}
+						//finally discard market_id from last_ids
+						last_ids.erase(market_id);
 					}
-					//finally discard market_id from last_ids
-					last_ids.erase(market_id);
+					sleep_secs = 10;
 				}
-
-				std::this_thread::sleep_for(std::chrono::seconds(10));
-
+				else {
+					sleep_secs = diff_in_secs - 10;
+				}
 			}
-			else
-				std::this_thread::sleep_for(std::chrono::seconds(diff_in_secs - 10));
-
 		}
-		else {
-			std::this_thread::sleep_for(std::chrono::seconds(30));
-		}
-
+		std::this_thread::sleep_for(std::chrono::seconds(sleep_secs));
 	}
 
 	
@@ -149,17 +155,31 @@ void Publisher::get_data() {
 	for (;;) {
 
 		for (int i = 0; i < socks.size(); ++i) {
-			
-			if (sock_flags[i].load()) {
+			std::deque<std::pair<std::string, Market_Projection> > subscribed_snapshot;
+			bool active_socket = false;
+			{
+				std::lock_guard<std::mutex> lk(mut_);
+				active_socket = sock_flags[i].load();
+				if (active_socket) {
+					try {
+						msg = socks[i]->recv_buff();
+						subscribed_snapshot = subscribed_;
+					}
+					catch (boost::system::system_error e) {
+						spdlog::error(e.what());
+						spdlog::error("Stopped collecting market data due to network failure");
+						active_socket = false;
+					}
+				}
+			}
+			if (active_socket) {
 				try {
-					msg = socks[i]->recv_buff();
-					parser.parse(i, msg).parse_and_update(subscribed_);
+					parser.parse(i, msg).parse_and_update(subscribed_snapshot);
 				}
 				catch (boost::system::system_error e) {
 					spdlog::error(e.what());
 					spdlog::error("Stopped collecting market data due to network failure");
 				}
-				
 			}
 			else {
 				parser.reset(i);

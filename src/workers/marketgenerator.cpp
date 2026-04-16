@@ -49,6 +49,7 @@ void MarketGenerator::generate() {
 std::queue<std::pair<std::string, Market_Projection> > MarketGenerator::markets() {
 
 	wait_for_gen();
+	std::scoped_lock<std::mutex> lk(mut_);
 	std::queue<std::pair<std::string, Market_Projection> > temp;
 	while (!markets_.empty()) {
 		temp.push(markets_.front());
@@ -59,15 +60,22 @@ std::queue<std::pair<std::string, Market_Projection> > MarketGenerator::markets(
 
 void MarketGenerator::poll_within(int time1, int time2) {
 
-	wait_for_gen();
-	std::string time_now = Timing::now();
-	double diff = Timing::time_diff_mins(markets_.front().second.market_start_time_, time_now);
-	if (diff >= time1 && diff <= time2)
-		return;
-	if (diff < time1) {
-		markets_.pop();
+	for (;;) {
+		wait_for_gen();
+		{
+			std::scoped_lock<std::mutex> lk(mut_);
+			if (markets_.empty())
+				continue;
+			std::string time_now = Timing::now();
+			double diff = Timing::time_diff_mins(markets_.front().second.market_start_time_, time_now);
+			if (diff >= time1 && diff <= time2)
+				return;
+			if (diff < time1) {
+				markets_.pop();
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::seconds(10));
 	}
-	std::this_thread::sleep_for(std::chrono::duration(std::chrono::seconds(10)));
 }
 
 void MarketGenerator::wait_for_gen() {
@@ -80,6 +88,7 @@ void MarketGenerator::wait_for_gen() {
 std::queue<std::pair<std::string, Market_Projection> > MarketGenerator::markets_within(int time1, int time2) {
 
 	poll_within(time1, time2);
+	std::scoped_lock<std::mutex> lk(mut_);
 	std::queue<std::pair<std::string, Market_Projection> > temp;
 	while (!markets_.empty()) {
 		auto mkt = markets_.front();

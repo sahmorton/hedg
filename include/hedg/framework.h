@@ -15,13 +15,13 @@ public:
 		: gen{ gen_frequency, Timing::mins }, pub{ gen, handler, service, context }{}
 
 	void initialize() {
+		handler = std::make_unique<Market_Handler>(Market_Handler(markets));
+		t_pool.resize(std::thread::hardware_concurrency());
 		threads.emplace_back(&MarketGenerator::generate, &gen);
 		threads.emplace_back(&Publisher::run, &pub);
 		threads.emplace_back(&Publisher::order_subscribe, &pub, std::ref(service), std::ref(context));
 		threads.emplace_back(&Publisher::clean_up_markets, &pub, std::ref(service), std::ref(context));
 		threads.emplace_back(&Publisher::get_data, &pub);
-		handler = std::make_unique<Market_Handler>(Market_Handler(markets));
-		t_pool.resize(std::thread::hardware_concurrency());
 		initialized = true;
 
 	}
