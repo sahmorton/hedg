@@ -45,8 +45,10 @@ void Parser::parse_and_update(const std::deque<std::pair<std::string, Market_Pro
 	auto img_error = doc_["ct"].get(img);
 	for (auto mkts : market_array) {
 		std::string_view id;
-		
-		mkts["id"].get(id);
+		auto id_error = mkts["id"].get(id);
+		if (id_error) {
+			continue;
+		}
 		std::string market_id = std::string(id);
 		for (auto runners : mkts["rc"]) {
 			int runner_id = runners["id"].get_int64();
